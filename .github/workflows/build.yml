@@ -28,25 +28,34 @@ jobs:
           Write-Host "Project folder: $($cmake.DirectoryName)"
           "PROJECT_DIR=$($cmake.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Install Qt 5.15.2 (MinGW 32-bit, supports Windows 7)
+          - name: Locate Qt and MinGW
         shell: pwsh
         run: |
-          python -m pip install aqtinstall
-          python -m aqt install-qt windows desktop 5.15.2 win32_mingw81 -O C:\Qt
-          python -m aqt install-tool windows desktop tools_mingw qt.tools.win32_mingw810 -O C:\Qt
-          Get-ChildItem C:\Qt, C:\Qt\Tools | Select-Object FullName
+          Write-Host "QT_ROOT_DIR = $env:QT_ROOT_DIR"
+          Write-Host "Qt5_DIR = $env:Qt5_DIR"
+          Write-Host "IQTA_TOOLS = $env:IQTA_TOOLS"
 
-      - name: Configure and build
-        shell: pwsh
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          $qt = $env:QT_ROOT_DIR
-          $mingw = (Get-ChildItem "$qt\..\..\Tools" -Directory -Filter "mingw*_32" | Select-Object -First 1).FullName
+          $qmake = Get-ChildItem D:\, C:\ -Recurse -Filter qmake.exe -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match 'mingw' } | Select-Object -First 1
+          if (-not $qmake) { Write-Error "qmake.exe not found"; exit 1 }
+          $qt = $qmake.Directory.Parent.FullName
+
+          $gpp = Get-ChildItem D:\, C:\ -Recurse -Filter g++.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'mingw.*_32' } | Select-Object -First 1
+          if (-not $gpp) { Write-Error "32-bit g++.exe not found"; exit 1 }
+          $mingw = $gpp.Directory.Parent.FullName
+
           Write-Host "Qt: $qt"
           Write-Host "MinGW: $mingw"
           "QT_DIR=$qt" | Out-File -FilePath $env:GITHUB_ENV -Append
           "MINGW_DIR=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Configure and build
+        shell: pwsh
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          $qt = $env:QT_DIR
+          $mingw = $env:MINGW_DIR
           $env:PATH = "$mingw\bin;$qt\bin;$env:PATH"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CXX_COMPILER="$mingw/bin/g++.exe" `

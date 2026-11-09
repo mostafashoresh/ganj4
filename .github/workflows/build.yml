@@ -40,25 +40,30 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          $env:PATH = "C:\Qt\Tools\mingw810_32\bin;C:\Qt\5.15.2\mingw81_32\bin;$env:PATH"
+          $qt = $env:QT_ROOT_DIR
+          $mingw = (Get-ChildItem "$qt\..\..\Tools" -Directory -Filter "mingw*_32" | Select-Object -First 1).FullName
+          Write-Host "Qt: $qt"
+          Write-Host "MinGW: $mingw"
+          "QT_DIR=$qt" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "MINGW_DIR=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $env:PATH = "$mingw\bin;$qt\bin;$env:PATH"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CXX_COMPILER="C:/Qt/Tools/mingw810_32/bin/g++.exe" `
-            -DCMAKE_RC_COMPILER="C:/Qt/Tools/mingw810_32/bin/windres.exe" `
-            -DCMAKE_PREFIX_PATH="C:/Qt/5.15.2/mingw81_32"
+            -DCMAKE_CXX_COMPILER="$mingw/bin/g++.exe" `
+            -DCMAKE_RC_COMPILER="$mingw/bin/windres.exe" `
+            -DCMAKE_PREFIX_PATH="$qt"
           cmake --build build -- -k 0
 
       - name: Collect files (Qt DLLs + MinGW runtime)
         shell: pwsh
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          $qt = "C:\Qt\5.15.2\mingw81_32"
-          $mingw = "C:\Qt\Tools\mingw810_32\bin"
+          $qt = $env:QT_DIR
+          $mingw = "$env:MINGW_DIR\bin"
           $env:PATH = "$mingw;$qt\bin;$env:PATH"
 
-          Write-Host "--- search for qwindows.dll ---"
-          Get-ChildItem C:\Qt -Recurse -Filter qwindows.dll -ErrorAction SilentlyContinue | Select-Object FullName
-          Write-Host "--- qt dir ---"
-          Get-ChildItem $qt | Select-Object Name
+          Write-Host "--- check plugins ---"
+          Get-ChildItem "$qt\plugins\platforms" | Select-Object Name
 
           New-Item -ItemType Directory -Force deploy | Out-Null
           Copy-Item build/Ganj.exe deploy/

@@ -28,64 +28,91 @@ jobs:
           Write-Host "Project folder: $($cmake.DirectoryName)"
           "PROJECT_DIR=$($cmake.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-          - name: Locate Qt and MinGW
+      - name: Install Qt 5.15.2 (MinGW 32-bit, supports Windows 7)
         shell: pwsh
         run: |
-          Write-Host "QT_ROOT_DIR = $env:QT_ROOT_DIR"
-          Write-Host "Qt5_DIR = $env:Qt5_DIR"
-          Write-Host "IQTA_TOOLS = $env:IQTA_TOOLS"
-
-          $qmake = Get-ChildItem D:\, C:\ -Recurse -Filter qmake.exe -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -match 'mingw' } | Select-Object -First 1
-          if (-not $qmake) { Write-Error "qmake.exe not found"; exit 1 }
-          $qt = $qmake.Directory.Parent.FullName
-
-          $gpp = Get-ChildItem D:\, C:\ -Recurse -Filter g++.exe -ErrorAction SilentlyContinue |
-                 Where-Object { $_.FullName -match 'mingw.*_32' } | Select-Object -First 1
-          if (-not $gpp) { Write-Error "32-bit g++.exe not found"; exit 1 }
-          $mingw = $gpp.Directory.Parent.FullName
-
-          Write-Host "Qt: $qt"
-          Write-Host "MinGW: $mingw"
-          "QT_DIR=$qt" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "MINGW_DIR=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Append
+          python -m pip install aqtinstall
+          python -m aqt install-qt windows desktop 5.15.2 win32_mingw81 -O C:\Qt
+          python -m aqt install-tool windows desktop tools_mingw qt.tools.win32_mingw810 -O C:\Qt
+          Write-Host "--- files named qwindows.dll under C:\Qt ---"
+          Get-ChildItem C:\Qt -Recurse -Filter "qwindows*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          Write-Host "--- files named qsqlite.dll under C:\Qt ---"
+          Get-ChildItem C:\Qt -Recurse -Filter "qsqlite*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
       - name: Configure and build
         shell: pwsh
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          $qt = $env:QT_DIR
-          $mingw = $env:MINGW_DIR
-          $env:PATH = "$mingw\bin;$qt\bin;$env:PATH"
+          $env:PATH = "C:\Qt\Tools\mingw810_32\bin;C:\Qt\5.15.2\mingw81_32\bin;$env:PATH"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_CXX_COMPILER="$mingw/bin/g++.exe" `
-            -DCMAKE_RC_COMPILER="$mingw/bin/windres.exe" `
-            -DCMAKE_PREFIX_PATH="$qt"
+            -DCMAKE_CXX_COMPILER="C:/Qt/Tools/mingw810_32/bin/g++.exe" `
+            -DCMAKE_RC_COMPILER="C:/Qt/Tools/mingw810_32/bin/windres.exe" `
+            -DCMAKE_PREFIX_PATH="C:/Qt/5.15.2/mingw81_32"
           cmake --build build -- -k 0
 
-      - name: Collect files (Qt DLLs + MinGW runtime)
+      - name: Collect files (Qt DLLs, plugins, MinGW runtime)
         shell: pwsh
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          $qt = $env:QT_DIR
-          $mingw = "$env:MINGW_DIR\bin"
+          $qt = "C:\Qt\5.15.2\mingw81_32"
+          $mingw = "C:\Qt\Tools\mingw810_32\bin"
           $env:PATH = "$mingw;$qt\bin;$env:PATH"
 
-          Write-Host "--- check plugins ---"
-          Get-ChildItem "$qt\plugins\platforms" | Select-Object Name
-
+          if (Test-Path deploy) { Remove-Item deploy -Recurse -Force }
           New-Item -ItemType Directory -Force deploy | Out-Null
           Copy-Item build/Ganj.exe deploy/
 
-          & "$qt\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler `
-            --no-opengl-sw --no-angle deploy/Ganj.exe
-          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+          # 1) Try windeployqt, but do not depend on it
+          & "$qt\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-angle deploy/Ganj.exe
+          Write-Host "windeployqt exit code: $LASTEXITCODE (ignored, files are verified below)"
+          $global:LASTEXITCODE = 0
 
-          foreach ($d in 'libgcc_s_dw2-1.dll','libstdc++-6.dll','libwinpthread-1.dll') {
-            if (-not (Test-Path "deploy/$d")) { Copy-Item "$mingw\$d" deploy/ }
+          # 2) Copy everything the app needs by hand (only if still missing)
+          function Copy-IfMissing($src, $dstDir) {
+            New-Item -ItemType Directory -Force $dstDir | Out-Null
+            $name = Split-Path $src -Leaf
+            if (-not (Test-Path (Join-Path $dstDir $name))) {
+              if (-not (Test-Path $src)) { throw "Missing source file: $src" }
+              Copy-Item $src $dstDir
+              Write-Host "copied $name"
+            }
           }
+
+          foreach ($l in 'Qt5Core','Qt5Gui','Qt5Widgets','Qt5Sql') {
+            Copy-IfMissing "$qt\bin\$l.dll" "deploy"
+          }
+          foreach ($d in 'libgcc_s_dw2-1.dll','libstdc++-6.dll','libwinpthread-1.dll') {
+            Copy-IfMissing "$mingw\$d" "deploy"
+          }
+
+          # plugin folder: normally $qt\plugins, otherwise search for it
+          $pluginRoot = "$qt\plugins"
+          if (-not (Test-Path "$pluginRoot\platforms\qwindows.dll")) {
+            $found = Get-ChildItem C:\Qt -Recurse -Filter qwindows.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { throw "qwindows.dll does not exist anywhere under C:\Qt - Qt install is incomplete" }
+            $pluginRoot = $found.Directory.Parent.FullName
+          }
+          Write-Host "Plugin root: $pluginRoot"
+
+          Copy-IfMissing "$pluginRoot\platforms\qwindows.dll"  "deploy\platforms"
+          Copy-IfMissing "$pluginRoot\sqldrivers\qsqlite.dll"  "deploy\sqldrivers"
+          Copy-IfMissing "$pluginRoot\styles\qwindowsvistastyle.dll" "deploy\styles"
+          foreach ($p in 'qjpeg','qico','qgif') {
+            $f = "$pluginRoot\imageformats\$p.dll"
+            if (Test-Path $f) { Copy-IfMissing $f "deploy\imageformats" }
+          }
+
           if (Test-Path resources/fonts) { Copy-Item resources/fonts deploy/fonts -Recurse }
-          Get-ChildItem deploy -Recurse | Select-Object FullName
+
+          # 3) Final verification
+          foreach ($req in 'Ganj.exe','Qt5Core.dll','Qt5Gui.dll','Qt5Widgets.dll','Qt5Sql.dll',
+                           'libgcc_s_dw2-1.dll','libstdc++-6.dll','libwinpthread-1.dll',
+                           'platforms\qwindows.dll','sqldrivers\qsqlite.dll') {
+            if (-not (Test-Path "deploy\$req")) { throw "deploy\$req is missing" }
+          }
+          Write-Host "--- deploy contents ---"
+          Get-ChildItem deploy -Recurse -File | ForEach-Object { Write-Host $_.FullName.Substring((Resolve-Path deploy).Path.Length) }
+          exit 0
 
       - name: Build installer
         shell: pwsh
@@ -93,6 +120,7 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ganj.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
       - uses: actions/upload-artifact@v4
         with:
